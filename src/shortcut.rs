@@ -5,8 +5,18 @@
 //! Esc to cancel or dismiss the HUD are registered as *defaults*, so users can
 //! rebind them in System Settings → Shortcuts → fishpr and the choice sticks.
 //!
+//! Ctrl+Space can be configured as hold-to-talk or press-to-toggle. The choice
+//! comes from the tray menu and is read on every press, so it applies without
+//! a restart. In toggle mode KGlobalAccel's repeated presses while a key is
+//! held must not toggle again; only the first press counts.
+//!
 //! Esc is grabbed only while the HUD is on screen. KWin then keeps it from
 //! the focused app; the rest of the time, apps get it as usual.
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
@@ -94,8 +104,14 @@ pub struct Shortcut {
 
 impl Shortcut {
     /// Registers the shortcuts. Esc is grabbed while `hud_visible` is true.
-    /// `bindings` follows the keys the user has bound.
-    pub async fn register(events: UnboundedSender<Event>, mut hud_visible: watch::Receiver<bool>, bindings: watch::Sender<Bindings>) -> Result<Self> {
+    /// `bindings` follows the keys the user has bound, and `toggle_mode` says
+    /// whether Ctrl+Space acts on press and release or toggles on each press.
+    pub async fn register(
+        events: UnboundedSender<Event>,
+        mut hud_visible: watch::Receiver<bool>,
+        bindings: watch::Sender<Bindings>,
+        toggle_mode: Arc<AtomicBool>,
+    ) -> Result<Self> {
         let conn = zbus::Connection::session().await?;
         if !is_kde(&conn).await {
             bail!("this isn't KDE Plasma, which fishpr's shortcut needs");
@@ -146,12 +162,16 @@ impl Shortcut {
         let mut released = component.receive_global_shortcut_released().await?;
         tokio::spawn(async move {
             // Held keys repeat their presses. Paste-last acts on release
-            // instead, and Esc only on its first press.
+            // instead, Esc only on its first press, and push-to-talk only on
+            // the first press of each physical key press.
             let mut esc_down = false;
+            // None while the keys are up; otherwise whether that press began in
+            // toggle mode (so its release doesn't stop a toggle recording).
+            let mut push_to_talk_down = None;
             loop {
                 let event = tokio::select! {
                     Some(s) = pressed.next() => s.args().ok().and_then(|a| match a.shortcut_unique.as_str() {
-                        PUSH_TO_TALK => Some(Event::Start),
+                        PUSH_TO_TALK => push_to_talk_pressed(toggle_mode.load(Ordering::Relaxed), &mut push_to_talk_down),
                         DISMISS if !esc_down => {
                             esc_down = true;
                             Some(Event::Dismiss)
@@ -159,7 +179,7 @@ impl Shortcut {
                         _ => None,
                     }),
                     Some(s) = released.next() => s.args().ok().and_then(|a| match a.shortcut_unique.as_str() {
-                        PUSH_TO_TALK => Some(Event::Stop),
+                        PUSH_TO_TALK => push_to_talk_released(&mut push_to_talk_down),
                         PASTE_LAST => Some(Event::PasteLast),
                         DISMISS => {
                             esc_down = false;
@@ -184,6 +204,21 @@ impl Shortcut {
             let _ = self.accel.set_inactive(&id).await;
         }
     }
+}
+
+/// The event for a push-to-talk press. Repeated presses while the keys are
+/// held are ignored. In toggle mode the first press toggles recording and the
+/// release does nothing; in hold mode the press starts and the release stops.
+fn push_to_talk_pressed(toggle: bool, down: &mut Option<bool>) -> Option<Event> {
+    if down.is_some() {
+        return None;
+    }
+    *down = Some(toggle);
+    Some(if toggle { Event::Toggle } else { Event::Start })
+}
+
+fn push_to_talk_released(down: &mut Option<bool>) -> Option<Event> {
+    matches!(down.take(), Some(false)).then_some(Event::Stop)
 }
 
 /// Decides by the desktop, not by whether KGlobalAccel answers: D-Bus would
@@ -284,6 +319,35 @@ mod tests {
         assert_eq!(menu_shortcut(&[CTRL_ALT_V]), [["Control", "Alt", "V"]]);
         assert_eq!(label(&[CTRL_SPACE]).as_deref(), Some("Ctrl+Space"));
         assert_eq!(label(&[CTRL_ALT_V]).as_deref(), Some("Ctrl+Alt+V"));
+    }
+
+    #[test]
+    fn hold_mode_starts_on_press_and_stops_on_release() {
+        let mut down = None;
+        assert_eq!(push_to_talk_pressed(false, &mut down), Some(Event::Start));
+        assert_eq!(push_to_talk_pressed(false, &mut down), None);
+        assert_eq!(push_to_talk_released(&mut down), Some(Event::Stop));
+        assert_eq!(push_to_talk_released(&mut down), None);
+    }
+
+    #[test]
+    fn toggle_mode_toggles_once_per_press() {
+        let mut down = None;
+        assert_eq!(push_to_talk_pressed(true, &mut down), Some(Event::Toggle));
+        // Key auto-repeat while the shortcut is held.
+        assert_eq!(push_to_talk_pressed(true, &mut down), None);
+        assert_eq!(push_to_talk_released(&mut down), None);
+        assert_eq!(push_to_talk_pressed(true, &mut down), Some(Event::Toggle));
+        assert_eq!(push_to_talk_released(&mut down), None);
+    }
+
+    #[test]
+    fn changing_the_mode_mid_hold_finishes_the_old_gesture() {
+        let mut down = None;
+        assert_eq!(push_to_talk_pressed(false, &mut down), Some(Event::Start));
+        // The setting changed while the key was still down.
+        assert_eq!(push_to_talk_released(&mut down), Some(Event::Stop));
+        assert_eq!(push_to_talk_pressed(true, &mut down), Some(Event::Toggle));
     }
 
     #[test]
