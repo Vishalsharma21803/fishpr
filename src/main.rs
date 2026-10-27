@@ -1,4 +1,5 @@
 mod clipboard;
+mod config;
 mod control;
 mod desktop;
 mod history;
@@ -9,7 +10,13 @@ mod shortcut;
 mod transcribe;
 mod window;
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use anyhow::Result;
 use image::{RgbaImage, imageops::FilterType};
@@ -32,11 +39,12 @@ running fishpr; bind it to a key where fishpr can't register its shortcut.
 const ICON_SIZE: u32 = 64;
 
 /// Everything the main loop reacts to: tray clicks and `fishpr --toggle`
-/// toggle, the shortcut starts on press and stops on release, and the HUD's
-/// retry button transcribes the last failed recording again. The paste-last
-/// shortcut pastes the last transcription again, and the HUD's copy button
-/// copies it. Esc, while the HUD shows, cancels or dismisses what it shows.
-#[derive(Clone, Copy, PartialEq)]
+/// toggle, the shortcut starts on press and stops on release (or toggles on
+/// each press when that mode is selected), and the HUD's retry button
+/// transcribes the last failed recording again. The paste-last shortcut
+/// pastes the last transcription again, and the HUD's copy button copies it.
+/// Esc, while the HUD shows, cancels or dismisses what it shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Event {
     Toggle,
     Start,
@@ -67,6 +75,9 @@ struct FishTray {
     bindings: shortcut::Bindings,
     /// Whether there's a transcription to paste again.
     has_last: bool,
+    /// Whether the shortcut toggles on each press instead of only while held.
+    /// The shortcut task reads the same flag.
+    toggle_mode: Arc<AtomicBool>,
 }
 
 impl ksni::Tray for FishTray {
@@ -87,12 +98,16 @@ impl ksni::Tray for FishTray {
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
-        let description = match (self.state, shortcut::label(&self.bindings.push_to_talk)) {
-            (State::Loading, _) => "Starting…".into(),
-            (State::Idle | State::Failed { .. }, Some(keys)) => format!("Click or hold {keys} to record"),
-            (State::Idle | State::Failed { .. }, None) => "Click to record".into(),
-            (State::Recording, _) => "Recording… click or release to transcribe".into(),
-            (State::Transcribing, _) => "Transcribing…".into(),
+        let toggle = self.toggle_mode.load(Ordering::Relaxed);
+        let description = match (self.state, shortcut::label(&self.bindings.push_to_talk), toggle) {
+            (State::Loading, _, _) => "Starting…".into(),
+            (State::Idle | State::Failed { .. }, Some(keys), true) => format!("Press {keys} to start or stop recording"),
+            (State::Idle | State::Failed { .. }, Some(keys), false) => format!("Click or hold {keys} to record"),
+            (State::Idle | State::Failed { .. }, None, true) => "Click to start or stop recording".into(),
+            (State::Idle | State::Failed { .. }, None, false) => "Click to record".into(),
+            (State::Recording, _, true) => "Recording… click or press the shortcut to stop".into(),
+            (State::Recording, _, false) => "Recording… click or release to transcribe".into(),
+            (State::Transcribing, _, _) => "Transcribing…".into(),
         };
         ksni::ToolTip {
             title: "fishpr".into(),
@@ -102,8 +117,9 @@ impl ksni::Tray for FishTray {
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
-        use ksni::menu::StandardItem;
+        use ksni::menu::{RadioGroup, RadioItem, StandardItem, SubMenu};
         let recording = matches!(self.state, State::Recording);
+        let toggle = self.toggle_mode.load(Ordering::Relaxed);
         vec![
             StandardItem {
                 label: if recording { "Stop Recording" } else { "Start Recording" }.into(),
@@ -124,6 +140,30 @@ impl ksni::Tray for FishTray {
                 activate: Box::new(|t: &mut Self| {
                     let _ = t.events.send(Event::PasteLast);
                 }),
+                ..Default::default()
+            }
+            .into(),
+            ksni::MenuItem::Separator,
+            SubMenu {
+                label: "Shortcut Mode".into(),
+                icon_name: "input-keyboard".into(),
+                submenu: vec![
+                    RadioGroup {
+                        selected: usize::from(toggle),
+                        select: Box::new(|t: &mut Self, selected| {
+                            let mode = if selected == 1 { config::ShortcutMode::Toggle } else { config::ShortcutMode::Hold };
+                            t.toggle_mode.store(mode.is_toggle(), Ordering::Relaxed);
+                            if let Err(e) = config::save_shortcut_mode(mode) {
+                                eprintln!("fishpr: couldn't save the shortcut mode: {e:#}");
+                            }
+                        }),
+                        options: vec![
+                            RadioItem { label: "Hold to Talk".into(), ..Default::default() },
+                            RadioItem { label: "Press to Toggle".into(), ..Default::default() },
+                        ],
+                    }
+                    .into(),
+                ],
                 ..Default::default()
             }
             .into(),
@@ -341,12 +381,14 @@ async fn run() -> Result<()> {
     let (events_tx, mut events) = mpsc::unbounded_channel();
     let _control = control::serve(events_tx.clone()).await?;
 
+    let toggle_mode = Arc::new(AtomicBool::new(config::shortcut_mode().is_toggle()));
     let tray = FishTray {
         state: State::Loading,
         icon: tray_icon(),
         events: events_tx.clone(),
         bindings: shortcut::Bindings::default(),
         has_last: false,
+        toggle_mode: toggle_mode.clone(),
     };
     // Without a tray host (no System Tray widget in the panel), keep running
     // without the icon; it appears if one shows up later.
@@ -377,7 +419,7 @@ async fn run() -> Result<()> {
             }
         }
     });
-    let shortcut = match shortcut::Shortcut::register(events_tx.clone(), ui.hud.visibility(), bindings_tx).await {
+    let shortcut = match shortcut::Shortcut::register(events_tx.clone(), ui.hud.visibility(), bindings_tx, toggle_mode).await {
         Ok(s) => {
             if let Ok(marker) = &told_marker {
                 let _ = std::fs::remove_file(marker);

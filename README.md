@@ -14,6 +14,7 @@
 ## What it does
 
 - **Hold to talk.** Hold <kbd>Ctrl</kbd>+<kbd>Space</kbd> anywhere. A small black pill appears at the bottom of the screen, its bars moving with your voice. Let go and the transcription lands in the focused window about half a second later, however long you spoke.
+- **Or click to toggle.** Prefer a click over holding a key? Right-click the tray icon → **Shortcut Mode** → **Press to Toggle**. Then one press of <kbd>Ctrl</kbd>+<kbd>Space</kbd> starts recording, and the next press stops it and pastes the text. Hold-to-talk stays the default, and the choice is kept across restarts.
 - **Or click the tray icon.** Click once to start, click again to stop. Tray and shortcut share one state, so you can start with one and stop with the other.
 - **Pastes for you, and leaves your clipboard alone.** The text is pasted into the focused app with <kbd>Ctrl</kbd>+<kbd>V</kbd>, and whatever you had copied is still on your clipboard afterwards. Klipper doesn't keep a copy of the text either.
 - **Shows it when there's nowhere to paste.** If no text field takes the paste, the pill grows into a card that shows what you said, with a **Copy** button, for ten seconds. Resting the pointer on it keeps it open.
@@ -139,6 +140,7 @@ On first launch fishpr downloads the voice-activity model (Silero VAD, ~1 MB) to
 | Do this | Get this |
 |---|---|
 | Hold <kbd>Ctrl</kbd>+<kbd>Space</kbd>, speak, release | Text pasted into the focused window |
+| Right-click tray → **Shortcut Mode** → **Press to Toggle**, then press <kbd>Ctrl</kbd>+<kbd>Space</kbd> | Starts recording; press again to stop and paste (hold remains the default) |
 | Click the tray icon, speak, click again | Same |
 | Press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> | Your last transcription pasted again |
 | Press <kbd>Esc</kbd> while the pill shows | Recording or transcription cancelled, or the pill hidden |
@@ -148,6 +150,8 @@ On first launch fishpr downloads the voice-activity model (Silero VAD, ~1 MB) to
 | Right-click the tray icon → **Quit**, or run `pkill -x fishpr` | fishpr exits and releases <kbd>Ctrl</kbd>+<kbd>Space</kbd> |
 
 **Changing the shortcuts:** <kbd>Ctrl</kbd>+<kbd>Space</kbd>, <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>, and <kbd>Esc</kbd> are only the defaults, and your choices are kept across restarts. Rebind them in **System Settings → Keyboard → Shortcuts → fishpr → Push to talk (hold)**, **Paste last transcription**, and **Cancel or dismiss (while showing)**. While fishpr is running, the desktop captures the combo, so apps no longer see it. In most IDEs <kbd>Ctrl</kbd>+<kbd>Space</kbd> is "trigger suggestions", so rebind it if you miss that.
+
+**Hold or toggle:** **Push to talk (hold)** is the default behavior of the shortcut. To make the same shortcut start on one press and stop on the next, right-click the tray icon → **Shortcut Mode** → **Press to Toggle**. The setting is saved in `$XDG_CONFIG_HOME/fishpr/config` (`~/.config/fishpr/config` usually), and switching it back to **Hold to Talk** restores the original hold-to-talk behavior. This setting applies to the shortcut fishpr registers itself; the `fishpr --toggle` command always toggles.
 
 **Other desktops** (sway, Hyprland, and others) aren't supported, but may work: fishpr can't register its shortcut there, so bind the command `fishpr --toggle` to a key in the desktop's keyboard settings. It starts and stops recording like a tray click, so press once to start and again to stop.
 
@@ -189,7 +193,8 @@ To see what fishpr is doing, run it in a terminal: `pkill fishpr; fishpr`. When 
 | [`src/main.rs`](src/main.rs) | Tray icon, event loop (click / shortcut / quit), state and icon animation |
 | [`src/transcribe.rs`](src/transcribe.rs) | Streaming client for Google's speech service and the local VAD check. This is the only file that knows about the backend. |
 | [`src/recorder.rs`](src/recorder.rs) | Records the mic via `pw-record`, passing the audio on as it arrives |
-| [`src/shortcut.rs`](src/shortcut.rs) | <kbd>Ctrl</kbd>+<kbd>Space</kbd>, <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>, and <kbd>Esc</kbd> (only while the HUD shows) via KDE's KGlobalAccel (press *and* release) |
+| [`src/shortcut.rs`](src/shortcut.rs) | <kbd>Ctrl</kbd>+<kbd>Space</kbd>, <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>, and <kbd>Esc</kbd> (only while the HUD shows) via KDE's KGlobalAccel (press *and* release), with hold or toggle behavior |
+| [`src/config.rs`](src/config.rs) | Settings that outlive a restart, including whether the shortcut is hold-to-talk or press-to-toggle |
 | [`src/control.rs`](src/control.rs) | Single instance and `fishpr --toggle`, over D-Bus |
 | [`src/hud.rs`](src/hud.rs) | The on-screen pill: level bars, spinner, retry button, and the card with the copy button (wlr-layer-shell, software-rendered) |
 | [`src/paste.rs`](src/paste.rs) | Ctrl+V via uinput, with the portal fallback, once the modifier keys are up |

@@ -378,7 +378,7 @@ Kirigami.ScrollablePage {
             visible: list.count === 0
             icon.name: "view-history"
             text: "No transcriptions yet"
-            explanation: "Hold Ctrl+Space and speak. What you say shows up here, with its recording."
+            explanation: "Press or hold Ctrl+Space and speak. What you say shows up here, with its recording."
         }
     }
 }
